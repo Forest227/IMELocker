@@ -1,133 +1,82 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import shutil
-import subprocess
-import sys
-from pathlib import Path
 import io
+import shutil
 import struct
+import subprocess
+from pathlib import Path
+from xml.etree import ElementTree as ET
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image
 
 
-def lerp(a: int, b: int, t: float) -> int:
-    return int(round(a * (1.0 - t) + b * t))
+SVG_NS = "http://www.w3.org/2000/svg"
 
 
-def render_base(size: int = 1024) -> Image.Image:
-    w = h = 1024
-    transparent = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+def load_icon_paths(svg_path: Path) -> list[str]:
+    tree = ET.parse(svg_path)
+    root = tree.getroot()
+    paths: list[str] = []
+    for node in root.findall(f".//{{{SVG_NS}}}path"):
+        path_data = node.attrib.get("d")
+        if not path_data:
+            continue
+        if node.attrib.get("fill") == "none":
+            continue
+        paths.append(path_data)
+    return paths
 
-    # WeChat-ish green glass background.
-    top = (28, 230, 130)
-    bottom = (7, 193, 96)
-    gradient = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    gd = ImageDraw.Draw(gradient)
-    for y in range(h):
-        t = y / (h - 1)
-        gd.line(
-            [(0, y), (w, y)],
-            fill=(lerp(top[0], bottom[0], t), lerp(top[1], bottom[1], t), lerp(top[2], bottom[2], t), 255),
-        )
 
-    pad = 44
-    radius = 220
-    mask = Image.new("L", (w, h), 0)
-    md = ImageDraw.Draw(mask)
-    md.rounded_rectangle([pad, pad, w - pad, h - pad], radius=radius, fill=255)
+def build_composite_svg(keyboard_paths: list[str], lock_paths: list[str]) -> str:
+    keyboard_svg = "\n".join(f'      <path d="{path}" />' for path in keyboard_paths)
+    lock_svg = "\n".join(f'      <path d="{path}" />' for path in lock_paths)
+    return f"""<svg xmlns="{SVG_NS}" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#edf4ff" />
+    </linearGradient>
+    <linearGradient id="badge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#6db4ff" />
+      <stop offset="100%" stop-color="#2458e8" />
+    </linearGradient>
+    <filter id="cardShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="26" stdDeviation="24" flood-color="#193c86" flood-opacity="0.16" />
+    </filter>
+    <filter id="badgeShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#133a91" flood-opacity="0.3" />
+    </filter>
+  </defs>
 
-    img = transparent.copy()
-    img.paste(gradient, (0, 0), mask)
+  <g filter="url(#cardShadow)">
+    <rect x="120" y="160" width="784" height="596" rx="178" fill="url(#tile)" />
+    <rect x="134" y="174" width="756" height="568" rx="164" fill="none" stroke="rgba(152, 182, 235, 0.45)" stroke-width="6" />
+  </g>
 
-    # Glass highlights.
-    highlights = Image.new("RGBA", (w, h), (255, 255, 255, 0))
-    hd = ImageDraw.Draw(highlights)
-    hd.ellipse([-240, -260, int(w * 0.95), int(h * 0.62)], fill=(255, 255, 255, 90))
-    hd.ellipse([int(w * 0.15), -320, int(w * 1.25), int(h * 0.42)], fill=(255, 255, 255, 45))
-    highlights = highlights.filter(ImageFilter.GaussianBlur(42))
-    img = Image.alpha_composite(img, highlights)
+  <g transform="translate(192 146) scale(27)" fill="#5f83c9">
+{keyboard_svg}
+  </g>
 
-    # Subtle border.
-    bd = ImageDraw.Draw(img)
-    bd.rounded_rectangle([pad, pad, w - pad, h - pad], radius=radius, outline=(255, 255, 255, 120), width=10)
+  <g transform="translate(748 748)" filter="url(#badgeShadow)">
+    <rect x="-123" y="-123" width="246" height="246" rx="74" fill="url(#badge)" />
+    <rect x="-113" y="-113" width="226" height="226" rx="66" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="6" />
+    <g transform="translate(-72 -72) scale(6)" fill="#ffffff">
+{lock_svg}
+    </g>
+  </g>
+</svg>
+"""
 
-    # Keyboard layer (white).
-    keyboard = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    kd = ImageDraw.Draw(keyboard)
-    kb_w, kb_h = 690, 370
-    kb_x, kb_y = (w - kb_w) // 2, 318
-    kb_r = 110
-    kb_rect = [kb_x, kb_y, kb_x + kb_w, kb_y + kb_h]
 
-    # Shadow.
-    shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    sd = ImageDraw.Draw(shadow)
-    sd.rounded_rectangle(kb_rect, radius=kb_r, fill=(0, 0, 0, 120))
-    shadow = shadow.filter(ImageFilter.GaussianBlur(34))
-    shadow_offset = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    shadow_offset.paste(shadow, (0, 18), shadow)
-    img = Image.alpha_composite(img, shadow_offset)
-
-    kd.rounded_rectangle(kb_rect, radius=kb_r, fill=(255, 255, 255, 235))
-    kd.rounded_rectangle(
-        [kb_x + 22, kb_y + 22, kb_x + kb_w - 22, kb_y + kb_h - 22],
-        radius=kb_r - 22,
-        outline=(255, 255, 255, 120),
-        width=6,
+def rasterize_svg(svg_path: Path, output_dir: Path) -> Path:
+    subprocess.run(
+        ["qlmanage", "-t", "-s", "1024", "-o", str(output_dir), str(svg_path)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-
-    # Keys (subtle emboss).
-    key_color = (0, 70, 40, 55)
-    key_w, key_h, gap = 56, 48, 16
-    top_margin = 78
-    for row, count in enumerate([8, 7, 6]):
-        total = count * key_w + (count - 1) * gap
-        x0 = kb_x + (kb_w - total) // 2
-        y0 = kb_y + top_margin + row * (key_h + gap)
-        for i in range(count):
-            x = x0 + i * (key_w + gap)
-            kd.rounded_rectangle([x, y0, x + key_w, y0 + key_h], radius=12, fill=key_color)
-
-    # Space bar.
-    space_w = key_w * 3 + gap * 2
-    space_x0 = kb_x + (kb_w - space_w) // 2
-    space_y0 = kb_y + top_margin + 3 * (key_h + gap)
-    kd.rounded_rectangle([space_x0, space_y0, space_x0 + space_w, space_y0 + key_h], radius=14, fill=key_color)
-
-    img = Image.alpha_composite(img, keyboard)
-
-    # Badge + lock.
-    badge = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    bdg = ImageDraw.Draw(badge)
-    cx, cy = 770, 770
-    d = 276
-    bbox = [cx - d // 2, cy - d // 2, cx + d // 2, cy + d // 2]
-    bdg.ellipse(bbox, fill=(4, 92, 54, 240))
-    bdg.ellipse([bbox[0] + 14, bbox[1] + 10, bbox[2] - 24, bbox[3] - 60], fill=(255, 255, 255, 40))
-
-    white = (255, 255, 255, 245)
-    sh_r = 58
-    arc_bbox = [cx - sh_r, cy - 118, cx + sh_r, cy - 2]
-    bdg.arc(arc_bbox, start=180, end=0, fill=white, width=18)
-    bdg.line([(cx - sh_r, cy - 60), (cx - sh_r, cy - 34)], fill=white, width=18)
-    bdg.line([(cx + sh_r, cy - 60), (cx + sh_r, cy - 34)], fill=white, width=18)
-
-    body_w, body_h = 140, 116
-    body = [cx - body_w // 2, cy - 34, cx + body_w // 2, cy - 34 + body_h]
-    bdg.rounded_rectangle(body, radius=20, fill=white)
-
-    # Keyhole.
-    kh = (4, 92, 54, 210)
-    bdg.ellipse([cx - 11, cy + 12 - 11, cx + 11, cy + 12 + 11], fill=kh)
-    bdg.rounded_rectangle([cx - 6, cy + 12, cx + 6, cy + 44], radius=4, fill=kh)
-
-    badge = badge.filter(ImageFilter.GaussianBlur(0.6))
-    img = Image.alpha_composite(img, badge)
-
-    if size != 1024:
-        img = img.resize((size, size), Image.Resampling.LANCZOS)
-    return img
+    return output_dir / f"{svg_path.name}.png"
 
 
 def main() -> int:
@@ -135,15 +84,29 @@ def main() -> int:
     build_dir = root / "build"
     iconset = build_dir / "AppIcon.iconset"
     icns_out = root / "Resources" / "AppIcon.icns"
+    icon_sources_dir = root / "Resources" / "icon-sources"
+
+    keyboard_svg_source = icon_sources_dir / "material-keyboard.svg"
+    lock_svg_source = icon_sources_dir / "material-lock.svg"
 
     build_dir.mkdir(parents=True, exist_ok=True)
     if iconset.exists():
         shutil.rmtree(iconset)
     iconset.mkdir(parents=True, exist_ok=True)
 
-    base = render_base(1024)
-    base_path = build_dir / "AppIcon_1024.png"
-    base.save(base_path, format="PNG")
+    composite_svg = build_dir / "AppIcon_library.svg"
+    composite_png = build_dir / "AppIcon_library_1024.png"
+    app_png = build_dir / "AppIcon_1024.png"
+
+    svg_contents = build_composite_svg(
+        keyboard_paths=load_icon_paths(keyboard_svg_source),
+        lock_paths=load_icon_paths(lock_svg_source),
+    )
+    composite_svg.write_text(svg_contents, encoding="utf-8")
+
+    rendered_png = rasterize_svg(composite_svg, build_dir)
+    Image.open(rendered_png).save(composite_png, format="PNG")
+    Image.open(rendered_png).save(app_png, format="PNG")
 
     sizes: list[tuple[str, int]] = [
         ("icon_16x16.png", 16),
@@ -158,22 +121,15 @@ def main() -> int:
         ("icon_512x512@2x.png", 1024),
     ]
 
-    for filename, sz in sizes:
-        img = base if sz == 1024 else base.resize((sz, sz), Image.Resampling.LANCZOS)
-        img.save(iconset / filename, format="PNG")
+    base = Image.open(composite_png).convert("RGBA")
+    for filename, size in sizes:
+        image = base if size == 1024 else base.resize((size, size), Image.Resampling.LANCZOS)
+        image.save(iconset / filename, format="PNG")
 
-    # Build .icns directly (avoid iconutil in restricted environments).
-    # PNG-based element type codes (observed in system .icns files):
-    # - 32x32   -> ic11
-    # - 64x64   -> ic12
-    # - 128x128 -> ic07
-    # - 256x256 -> ic08 (also ic13)
-    # - 512x512 -> ic09 (also ic14)
-    # - 1024x1024 -> ic10
-    def png_bytes(img: Image.Image) -> bytes:
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue()
+    def png_bytes(image: Image.Image) -> bytes:
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
 
     variants: list[tuple[str, int]] = [
         ("ic11", 32),
@@ -187,20 +143,21 @@ def main() -> int:
     ]
 
     chunks: list[tuple[str, bytes]] = []
-    for code, sz in variants:
-        img = base if sz == 1024 else base.resize((sz, sz), Image.Resampling.LANCZOS)
-        chunks.append((code, png_bytes(img)))
+    for code, size in variants:
+        image = base if size == 1024 else base.resize((size, size), Image.Resampling.LANCZOS)
+        chunks.append((code, png_bytes(image)))
 
-    total_len = 8 + sum(8 + len(data) for _, data in chunks)
-    out = bytearray()
-    out += b"icns"
-    out += struct.pack(">I", total_len)
+    total_length = 8 + sum(8 + len(data) for _, data in chunks)
+    output = bytearray()
+    output += b"icns"
+    output += struct.pack(">I", total_length)
     for code, data in chunks:
-        out += code.encode("latin1")
-        out += struct.pack(">I", 8 + len(data))
-        out += data
-    icns_out.write_bytes(out)
-    print(f"Wrote: {icns_out} (from {base_path})")
+        output += code.encode("latin1")
+        output += struct.pack(">I", 8 + len(data))
+        output += data
+    icns_out.write_bytes(output)
+
+    print(f"Wrote: {icns_out} (from {composite_png})")
     return 0
 
 

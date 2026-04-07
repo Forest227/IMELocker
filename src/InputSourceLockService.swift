@@ -10,6 +10,7 @@ struct InputSource: Hashable {
 final class InputSourceLockService {
   private enum Timing {
     static let enforceDelay: TimeInterval = 0.05
+    static let periodicCheckInterval: TimeInterval = 5.0
   }
 
   private let log = Logger(subsystem: AppConstants.loggerSubsystem, category: "InputSourceLockService")
@@ -17,6 +18,7 @@ final class InputSourceLockService {
   private let distributedNotificationCenter = DistributedNotificationCenter.default()
   private let workspaceNotificationCenter = NSWorkspace.shared.notificationCenter
   private var enforceWorkItem: DispatchWorkItem?
+  private var periodicCheckTimer: Timer?
   private var hasStarted = false
 
   private let handlerLock = NSLock()
@@ -28,6 +30,7 @@ final class InputSourceLockService {
   }
 
   deinit {
+    periodicCheckTimer?.invalidate()
     distributedNotificationCenter.removeObserver(self)
     workspaceNotificationCenter.removeObserver(self)
   }
@@ -77,6 +80,7 @@ final class InputSourceLockService {
 
     autoPickWeChatIfNeeded()
     observeSystemNotifications()
+    startPeriodicCheck()
     enforce(reason: "start")
   }
 
@@ -100,6 +104,20 @@ final class InputSourceLockService {
       name: NSWorkspace.didActivateApplicationNotification,
       object: nil
     )
+  }
+
+  private func startPeriodicCheck() {
+    periodicCheckTimer?.invalidate()
+
+    let timer = Timer(
+      timeInterval: Timing.periodicCheckInterval,
+      repeats: true
+    ) { [weak self] _ in
+      self?.handlePeriodicCheck()
+    }
+    timer.tolerance = 0.2
+    RunLoop.main.add(timer, forMode: .common)
+    periodicCheckTimer = timer
   }
 
   func selectableInputSources() -> [InputSource] {
@@ -204,6 +222,13 @@ final class InputSourceLockService {
   @objc private func activeAppChanged(_ notification: Notification) {
     enforce(reason: "activeAppChanged")
     notifyStateChanged()
+  }
+
+  private func handlePeriodicCheck() {
+    guard isEnabled else { return }
+    guard targetInputSourceID != nil else { return }
+
+    enforce(reason: "periodicCheck")
   }
 
   private func inputSourceRef(byID id: String) -> TISInputSource? {
