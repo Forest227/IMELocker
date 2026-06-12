@@ -20,19 +20,14 @@
 - macOS 12 或更高版本
 - 建议 macOS 13+ 以获得更稳定的「登录时启动」体验
 
-## 下载与安装
+## 下载安装
 
-发布版本在 GitHub Releases：
+前往 **[GitHub Releases](https://github.com/Forest227/IMELocker/releases/latest)** 下载最新 `.dmg` 安装包。
 
-[Releases](https://github.com/Forest227/IMELocker/releases)
+1. 打开 `.dmg`，把 `输入法锁定.app` 拖到 `Applications`。
+2. 首次启动时如果被系统拦截，在「系统设置 → 隐私与安全性」中选择仍要打开。
 
-安装步骤：
-
-1. 下载最新的 `.dmg` 安装包。
-2. 打开后把 `输入法锁定.app` 拖到 `Applications`。
-3. 首次启动时如果被系统拦截，在「系统设置 → 隐私与安全性」中选择仍要打开。
-
-> **注意：** 当前发布版本未做开发者签名和 Apple 公证，首次打开可能会看到 macOS 安全提示。建议把应用放到 `Applications` 后再开启「登录时启动」。
+> **注意：** 当前版本未做开发者签名和 Apple 公证，首次打开可能会看到 macOS 安全提示。建议把应用放到 `Applications` 后再开启「登录时启动」。
 
 ## 使用方法
 
@@ -87,38 +82,18 @@
 
 ## 从源码构建
 
-在仓库根目录执行：
+如需自行编译，在仓库根目录执行：
 
 ```bash
 ./build.sh
 ```
 
-生成产物：
+生成产物：`build/输入法锁定.app`
 
-```
-build/输入法锁定.app
-```
-
-构建脚本会自动编译 arm64 和 x86_64 并合并为通用二进制。如果 x86_64 编译失败，会降级为仅 arm64。
-
-## 打包 DMG
-
-本地生成安装包：
+构建脚本会自动编译 arm64 和 x86_64 并合并为通用二进制。打包 DMG：
 
 ```bash
 ./scripts/build_dmg.sh
-```
-
-默认输出：
-
-```
-build/IMELocker-v0.0.2.dmg
-```
-
-也可以指定版本号：
-
-```bash
-./scripts/build_dmg.sh 0.0.2
 ```
 
 ## 版本历史
