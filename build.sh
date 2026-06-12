@@ -107,19 +107,26 @@ case "${TARGET_VALUE}" in
     ;;
 esac
 
-# ── 后处理 ──
+# ── 后处理：复制 Swift 运行时 ──
 if STD_TOOL="$(xcrun --find swift-stdlib-tool 2>/dev/null)"; then
   "${STD_TOOL}" \
     --copy \
     --scan-executable "${OUT_BIN}" \
     --destination "${APP_DIR}/Contents/Frameworks" \
     --platform macosx \
-    --sign - \
     --strip-bitcode >/dev/null 2>&1 || true
 fi
 
+# ── 签名：先签 Frameworks，再签主二进制 ──
 if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign - "${APP_DIR}" >/dev/null 2>&1 || true
+  # 签名 Frameworks 下的每个 dylib
+  if [[ -d "${APP_DIR}/Contents/Frameworks" ]]; then
+    find "${APP_DIR}/Contents/Frameworks" -name "*.dylib" -o -name "*.framework" | while read -r lib; do
+      codesign --force --sign - "${lib}" >/dev/null 2>&1 || true
+    done
+  fi
+  # 签名主 app bundle
+  codesign --force --sign - "${APP_DIR}" >/dev/null 2>&1 || true
 fi
 
 echo "Built: ${APP_DIR} (${TARGET_VALUE})"
