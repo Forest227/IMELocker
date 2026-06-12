@@ -21,8 +21,11 @@ final class InputSourceLockService {
   private var periodicCheckTimer: Timer?
   private var hasStarted = false
 
-  private let handlerLock = NSLock()
+  private let handlerQueue = DispatchQueue(label: "com.inputsourcelock.handlers")
   private var stateChangeHandlers: [UUID: () -> Void] = [:]
+
+  // 输入法列表缓存，在 kTISNotifyEnabledKeyboardInputSourcesChanged 时失效
+  private var cachedSelectableSources: [InputSource]?
 
   private enum DefaultsKey {
     static let enabled = "enabled"
@@ -38,22 +41,24 @@ final class InputSourceLockService {
   @discardableResult
   func addStateChangeHandler(_ handler: @escaping () -> Void) -> UUID {
     let id = UUID()
-    handlerLock.lock()
-    stateChangeHandlers[id] = handler
-    handlerLock.unlock()
+    handlerQueue.sync { stateChangeHandlers[id] = handler }
     return id
   }
 
   func removeStateChangeHandler(_ id: UUID) {
-    handlerLock.lock()
-    stateChangeHandlers[id] = nil
-    handlerLock.unlock()
+    handlerQueue.sync { stateChangeHandlers[id] = nil }
   }
 
   var isEnabled: Bool {
     get { defaults.object(forKey: DefaultsKey.enabled) as? Bool ?? true }
     set {
       defaults.set(newValue, forKey: DefaultsKey.enabled)
+      if newValue {
+        startPeriodicCheck()
+      } else {
+        periodicCheckTimer?.invalidate()
+        periodicCheckTimer = nil
+      }
       notifyStateChanged()
     }
   }
@@ -107,6 +112,7 @@ final class InputSourceLockService {
   }
 
   private func startPeriodicCheck() {
+    guard isEnabled else { return }
     periodicCheckTimer?.invalidate()
 
     let timer = Timer(
@@ -121,26 +127,11 @@ final class InputSourceLockService {
   }
 
   func selectableInputSources() -> [InputSource] {
-    guard let list = TISCreateInputSourceList(nil, false)?.takeRetainedValue() as? [TISInputSource] else {
-      return []
+    if let cached = cachedSelectableSources {
+      return cached
     }
-
-    var sources: [InputSource] = []
-    sources.reserveCapacity(list.count)
-    for source in list {
-      guard boolProperty(source, kTISPropertyInputSourceIsSelectCapable) else { continue }
-      guard boolProperty(source, kTISPropertyInputSourceIsEnabled) else { continue }
-      guard let id = stringProperty(source, kTISPropertyInputSourceID) else { continue }
-      guard let name = stringProperty(source, kTISPropertyLocalizedName) else { continue }
-
-      sources.append(InputSource(id: id, name: name))
-    }
-
-    // 稳定排序：先按名称，再按 id
-    sources.sort { lhs, rhs in
-      if lhs.name == rhs.name { return lhs.id < rhs.id }
-      return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-    }
+    let sources = fetchSelectableInputSources()
+    cachedSelectableSources = sources
     return sources
   }
 
@@ -154,11 +145,22 @@ final class InputSourceLockService {
 
   func targetInputSource() -> InputSource? {
     guard let id = targetInputSourceID else { return nil }
-    return selectableInputSources().first(where: { $0.id == id })
+    // 优先从缓存中查找，避免重复调用 TISCreateInputSourceList
+    if let cached = cachedSelectableSources {
+      return cached.first(where: { $0.id == id })
+    }
+    return inputSourceRef(byID: id).flatMap { ref in
+      guard let name = stringProperty(ref, kTISPropertyLocalizedName) else { return nil }
+      return InputSource(id: id, name: name)
+    }
   }
 
   func enforce(reason: String) {
     scheduleEnforce(reason: reason)
+  }
+
+  func enforceSync(reason: String) {
+    enforceNow(reason: reason)
   }
 
   private func scheduleEnforce(reason: String) {
@@ -194,7 +196,6 @@ final class InputSourceLockService {
   private func autoPickWeChatIfNeeded() {
     guard targetInputSourceID == nil else { return }
 
-    // 尝试用名称/ID 进行一次“微信输入法”自动匹配，避免首次启动还要手动选。
     let candidates = selectableInputSources()
     if let wechat = candidates.first(where: matchesWeChatByName) {
       targetInputSourceID = wechat.id
@@ -202,7 +203,6 @@ final class InputSourceLockService {
       return
     }
 
-    // 常见 bundle/id 关键词兜底（不同版本可能不同）
     if let wechat = candidates.first(where: matchesWeChatByID) {
       targetInputSourceID = wechat.id
       log.debug("Auto-picked target input source by id: \(wechat.id, privacy: .public)")
@@ -215,6 +215,7 @@ final class InputSourceLockService {
   }
 
   @objc private func inputSourcesEnabledChanged(_ notification: Notification) {
+    cachedSelectableSources = nil
     autoPickWeChatIfNeeded()
     notifyStateChanged()
   }
@@ -249,6 +250,30 @@ final class InputSourceLockService {
     return normalizedID.contains("tencent") || normalizedID.contains("wechat")
   }
 
+  private func fetchSelectableInputSources() -> [InputSource] {
+    guard let list = TISCreateInputSourceList(nil, false)?.takeRetainedValue() as? [TISInputSource] else {
+      return []
+    }
+
+    var sources: [InputSource] = []
+    sources.reserveCapacity(list.count)
+    for source in list {
+      guard boolProperty(source, kTISPropertyInputSourceIsSelectCapable) else { continue }
+      guard boolProperty(source, kTISPropertyInputSourceIsEnabled) else { continue }
+      guard let id = stringProperty(source, kTISPropertyInputSourceID) else { continue }
+      guard let name = stringProperty(source, kTISPropertyLocalizedName) else { continue }
+
+      sources.append(InputSource(id: id, name: name))
+    }
+
+    // 稳定排序：先按名称，再按 id
+    sources.sort { lhs, rhs in
+      if lhs.name == rhs.name { return lhs.id < rhs.id }
+      return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+    }
+    return sources
+  }
+
   private func anyProperty(_ source: TISInputSource, _ key: CFString) -> AnyObject? {
     guard let ptr = TISGetInputSourceProperty(source, key) else { return nil }
     return Unmanaged<AnyObject>.fromOpaque(ptr).takeUnretainedValue()
@@ -260,19 +285,17 @@ final class InputSourceLockService {
 
   private func boolProperty(_ source: TISInputSource, _ key: CFString) -> Bool {
     guard let value = anyProperty(source, key) else { return false }
-    if CFGetTypeID(value) == CFBooleanGetTypeID() {
-      return CFBooleanGetValue((value as! CFBoolean))
+    if CFGetTypeID(value) == CFBooleanGetTypeID(), let bool = value as? Bool {
+      return bool
     }
     if let number = value as? NSNumber { return number.boolValue }
-    if let bool = value as? Bool { return bool }
     return false
   }
 
   private func notifyStateChanged() {
-    handlerLock.lock()
-    let handlers = Array(stateChangeHandlers.values)
-    handlerLock.unlock()
-
+    let handlers: [() -> Void] = handlerQueue.sync {
+      Array(stateChangeHandlers.values)
+    }
     guard !handlers.isEmpty else { return }
 
     if Thread.isMainThread {

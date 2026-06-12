@@ -38,22 +38,39 @@ COMMON_ARGS=(
   -framework ServiceManagement
 )
 
+# 并行编译 arm64 和 x86_64
 swiftc \
   "${COMMON_ARGS[@]}" \
   -module-cache-path "${MODULE_CACHE_DIR}/arm64" \
   -target "arm64-apple-macosx${MIN_MACOS_VERSION}" \
   -o "${ARM_BIN}" \
-  "${SWIFT_SOURCES[@]}"
+  "${SWIFT_SOURCES[@]}" &
+ARM_PID=$!
 
-if swiftc \
+X86_OK=true
+swiftc \
   "${COMMON_ARGS[@]}" \
   -module-cache-path "${MODULE_CACHE_DIR}/x86_64" \
   -target "x86_64-apple-macosx${MIN_MACOS_VERSION}" \
   -o "${X86_BIN}" \
-  "${SWIFT_SOURCES[@]}"; then
+  "${SWIFT_SOURCES[@]}" &
+X86_PID=$!
+
+# 等待 arm64 完成（必须成功）
+if ! wait "${ARM_PID}"; then
+  echo "error: arm64 build failed" >&2
+  exit 1
+fi
+
+# 等待 x86_64 完成（允许失败）
+if ! wait "${X86_PID}"; then
+  echo "warn: x86_64 build failed; output arm64-only binary" >&2
+  X86_OK=false
+fi
+
+if [[ "${X86_OK}" == true ]]; then
   lipo -create -output "${OUT_BIN}" "${ARM_BIN}" "${X86_BIN}"
 else
-  echo "warn: x86_64 build failed; output arm64-only binary" >&2
   cp "${ARM_BIN}" "${OUT_BIN}"
 fi
 
