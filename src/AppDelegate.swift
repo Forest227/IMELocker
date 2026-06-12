@@ -104,10 +104,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   @objc private func about() {
     let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.1"
     let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
-    AlertPresenter.show(
-      title: "关于「\(AppConstants.displayName)」",
-      message: "版本 \(version) (\(build))\n\n轻量 macOS 菜单栏工具，将输入法锁定到指定目标，防止应用偷偷切换。\n\nhttps://github.com/Forest227/IMELocker"
-    )
+
+    let latestVersion = fetchLatestVersion()
+    let hasUpdate = latestVersion.map { $0 != version } ?? false
+
+    let alert = NSAlert()
+    alert.messageText = AppConstants.displayName
+
+    // 版本信息 + 红点提示
+    let versionLine = NSMutableAttributedString()
+    versionLine.append(NSAttributedString(
+      string: "版本 \(version) (\(build))",
+      attributes: [.foregroundColor: NSColor.labelColor]
+    ))
+    if hasUpdate {
+      versionLine.append(NSAttributedString(
+        string: " ●",
+        attributes: [.foregroundColor: NSColor.systemRed]
+      ))
+      versionLine.append(NSAttributedString(
+        string: " 有新版本 \(latestVersion!)",
+        attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .light)]
+      ))
+    }
+    alert.informativeText = " "
+    alert.accessoryView = makeAboutAccessoryView(versionLine: versionLine)
+
+    // 按钮：有更新时高亮
+    if hasUpdate {
+      alert.addButton(withTitle: "查看更新 (\(latestVersion!))")
+    } else {
+      alert.addButton(withTitle: "查看更新")
+    }
+    alert.addButton(withTitle: "好")
+
+    NSApp.activate(ignoringOtherApps: true)
+    let response = alert.runModal()
+    if response == .alertFirstButtonReturn {
+      NSWorkspace.shared.open(URL(string: "https://github.com/Forest227/IMELocker/releases/latest")!)
+    }
+  }
+
+  private func makeAboutAccessoryView(versionLine: NSAttributedString) -> NSView {
+    let container = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 60))
+
+    let versionLabel = NSTextField(labelWithAttributedString: versionLine)
+    versionLabel.frame = NSRect(x: 0, y: 30, width: 260, height: 20)
+
+    let descLabel = NSTextField(labelWithString: "轻量 macOS 菜单栏工具，将输入法锁定到指定目标，防止应用偷偷切换。")
+    descLabel.frame = NSRect(x: 0, y: 0, width: 260, height: 30)
+    descLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+    descLabel.textColor = .secondaryLabelColor
+    descLabel.maximumNumberOfLines = 2
+    descLabel.lineBreakMode = .byWordWrapping
+
+    container.addSubview(versionLabel)
+    container.addSubview(descLabel)
+    return container
+  }
+
+  /// 从 GitHub API 获取最新 release 版本号，超时 3 秒
+  private func fetchLatestVersion() -> String? {
+    let semaphore = DispatchSemaphore(value: 0)
+    var result: String?
+
+    var request = URLRequest(url: URL(string: "https://api.github.com/repos/Forest227/IMELocker/releases/latest")!)
+    request.timeoutInterval = 3
+    request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
+
+    URLSession.shared.dataTask(with: request) { data, _, _ in
+      defer { semaphore.signal() }
+      guard let data,
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let tagName = json["tag_name"] as? String
+      else { return }
+      result = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
+    }.resume()
+
+    _ = semaphore.wait(timeout: .now() + 3)
+    return result
   }
 
   @objc private func quit() {
