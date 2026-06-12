@@ -28,22 +28,23 @@ jobs:
       - name: Build arm64 DMG
         run: bash scripts/build_dmg.sh "${{ steps.version.outputs.version }}" arm64
 
-      - name: Read release notes
-        id: notes
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # 读取 release notes
           NOTES_FILE="docs/releases/${GITHUB_REF_NAME}.md"
           if [[ -f "${NOTES_FILE}" ]]; then
-            # 用 EOF 保留多行内容
-            echo "body<<EOF" >> "$GITHUB_OUTPUT"
-            cat "${NOTES_FILE}" >> "$GITHUB_OUTPUT"
-            echo "" >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
+            BODY="$(cat "${NOTES_FILE}")"
           else
-            echo "body=" >> "$GITHUB_OUTPUT"
+            BODY=""
           fi
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          body: ${{ steps.notes.outputs.body }}
-          files: build/IMELocker-*.dmg
+          # 删除可能存在的旧 release（静默处理不存在的情况）
+          gh release delete "${GITHUB_REF_NAME}" --yes 2>/dev/null || true
+
+          # 创建新 release 并上传 DMG
+          gh release create "${GITHUB_REF_NAME}" \
+            build/IMELocker-*.dmg \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "${BODY}"
