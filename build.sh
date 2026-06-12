@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ── 参数解析 ──
+# 用法: ./build.sh [--target universal|arm64|x86_64]
+TARGET="${1:---target}"
+TARGET_VALUE="${2:-universal}"
+
+if [[ "${TARGET}" == "--target" ]]; then
+  :
+else
+  echo "用法: ./build.sh [--target universal|arm64|x86_64]" >&2
+  exit 1
+fi
+
+# ── 配置 ──
 APP_EXEC_NAME="InputSourceLock"
 APP_BUNDLE_NAME="输入法锁定"
 MIN_MACOS_VERSION="12.0"
@@ -38,42 +51,63 @@ COMMON_ARGS=(
   -framework ServiceManagement
 )
 
-# 并行编译 arm64 和 x86_64
-swiftc \
-  "${COMMON_ARGS[@]}" \
-  -module-cache-path "${MODULE_CACHE_DIR}/arm64" \
-  -target "arm64-apple-macosx${MIN_MACOS_VERSION}" \
-  -o "${ARM_BIN}" \
-  "${SWIFT_SOURCES[@]}" &
-ARM_PID=$!
+# ── 编译函数 ──
+build_arm64() {
+  swiftc \
+    "${COMMON_ARGS[@]}" \
+    -module-cache-path "${MODULE_CACHE_DIR}/arm64" \
+    -target "arm64-apple-macosx${MIN_MACOS_VERSION}" \
+    -o "${ARM_BIN}" \
+    "${SWIFT_SOURCES[@]}"
+}
 
-X86_OK=true
-swiftc \
-  "${COMMON_ARGS[@]}" \
-  -module-cache-path "${MODULE_CACHE_DIR}/x86_64" \
-  -target "x86_64-apple-macosx${MIN_MACOS_VERSION}" \
-  -o "${X86_BIN}" \
-  "${SWIFT_SOURCES[@]}" &
-X86_PID=$!
+build_x86_64() {
+  swiftc \
+    "${COMMON_ARGS[@]}" \
+    -module-cache-path "${MODULE_CACHE_DIR}/x86_64" \
+    -target "x86_64-apple-macosx${MIN_MACOS_VERSION}" \
+    -o "${X86_BIN}" \
+    "${SWIFT_SOURCES[@]}"
+}
 
-# 等待 arm64 完成（必须成功）
-if ! wait "${ARM_PID}"; then
-  echo "error: arm64 build failed" >&2
-  exit 1
-fi
+# ── 根据 target 执行编译 ──
+case "${TARGET_VALUE}" in
+  arm64)
+    build_arm64
+    cp "${ARM_BIN}" "${OUT_BIN}"
+    ;;
+  x86_64)
+    build_x86_64
+    cp "${X86_BIN}" "${OUT_BIN}"
+    ;;
+  universal|*)
+    # 并行编译
+    build_arm64 &
+    ARM_PID=$!
 
-# 等待 x86_64 完成（允许失败）
-if ! wait "${X86_PID}"; then
-  echo "warn: x86_64 build failed; output arm64-only binary" >&2
-  X86_OK=false
-fi
+    X86_OK=true
+    build_x86_64 &
+    X86_PID=$!
 
-if [[ "${X86_OK}" == true ]]; then
-  lipo -create -output "${OUT_BIN}" "${ARM_BIN}" "${X86_BIN}"
-else
-  cp "${ARM_BIN}" "${OUT_BIN}"
-fi
+    if ! wait "${ARM_PID}"; then
+      echo "error: arm64 build failed" >&2
+      exit 1
+    fi
 
+    if ! wait "${X86_PID}"; then
+      echo "warn: x86_64 build failed; output arm64-only binary" >&2
+      X86_OK=false
+    fi
+
+    if [[ "${X86_OK}" == true ]]; then
+      lipo -create -output "${OUT_BIN}" "${ARM_BIN}" "${X86_BIN}"
+    else
+      cp "${ARM_BIN}" "${OUT_BIN}"
+    fi
+    ;;
+esac
+
+# ── 后处理 ──
 if STD_TOOL="$(xcrun --find swift-stdlib-tool 2>/dev/null)"; then
   "${STD_TOOL}" \
     --copy \
@@ -88,4 +122,4 @@ if command -v codesign >/dev/null 2>&1; then
   codesign --force --deep --sign - "${APP_DIR}" >/dev/null 2>&1 || true
 fi
 
-echo "Built: ${APP_DIR}"
+echo "Built: ${APP_DIR} (${TARGET_VALUE})"
